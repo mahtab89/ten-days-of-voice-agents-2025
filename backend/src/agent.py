@@ -1,6 +1,8 @@
 import logging
 import json
 import asyncio
+from datetime import datetime
+
 from dotenv import load_dotenv
 from livekit.agents import (
     Agent,
@@ -16,6 +18,7 @@ from livekit.agents import (
     function_tool,
     RunContext
 )
+
 from livekit.plugins import murf, silero, google, deepgram, noise_cancellation
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
@@ -24,62 +27,92 @@ logger = logging.getLogger("agent")
 load_dotenv(".env.local")
 
 # ------------------------------
-# DAY 2: ORDER STATE
+# JSON FILE FOR LOGGING
 # ------------------------------
 
-order_state = {
-    "drinkType": None,
-    "size": None,
-    "milk": None,
-    "extras": [],
-    "name": None
-}
+LOG_FILE = "wellness_log.json"
+
+def load_previous_logs():
+    try:
+        with open(LOG_FILE, "r") as f:
+            return json.load(f)
+    except:
+        return []
+
+def save_logs(data):
+    with open(LOG_FILE, "w") as f:
+        json.dump(data, f, indent=4)
 
 # ------------------------------
-# SAVE ORDER TOOL
+# DAY 3 SAVE CHECK-IN TOOL
 # ------------------------------
 
 @function_tool
-async def save_order(context: RunContext, order: dict):
-    """Save completed coffee order to JSON."""
-    with open("final_order.json", "w") as f:
-        json.dump(order, f, indent=4)
-    return "Order saved successfully!"
+async def save_checkin(context: RunContext, mood: str, energy: str, goals: list, summary: str):
+    """Save daily wellness check-in to JSON."""
+    logs = load_previous_logs()
+
+    entry = {
+        "timestamp": datetime.now().isoformat(),
+        "mood": mood,
+        "energy": energy,
+        "goals": goals,
+        "summary": summary
+    }
+
+    logs.append(entry)
+    save_logs(logs)
+
+    return "Daily check-in saved successfully."
+
 
 # ------------------------------
-# BARISTA AGENT
+# WELLNESS ASSISTANT
 # ------------------------------
 
-class BaristaAssistant(Agent):
+class WellnessAssistant(Agent):
     def __init__(self):
+        previous_logs = load_previous_logs()
+
+        last_entry = ""
+        if previous_logs:
+            last = previous_logs[-1]
+            last_entry = f"Last time we talked, you said your mood was '{last['mood']}' and energy was '{last['energy']}'. "
+
         super().__init__(
-            instructions="""
-You are a friendly barista at BrewStar Café.
+            instructions=f"""
+You are a gentle, supportive daily wellness companion.
+You are NOT a doctor. Do NOT diagnose. Keep all advice simple and practical.
 
-Your job:
-- Take the customer’s voice order.
-- Ask follow-up questions until ALL fields are filled:
+Start the conversation by greeting the user warmly.
+Ask about:
+1. Mood
+2. Energy level
+3. A few simple goals for today
 
-{
-  "drinkType": "",
-  "size": "",
-  "milk": "",
-  "extras": [],
-  "name": ""
-}
+If logs exist:
+- Casually reference past data, for example:
+  '{last_entry}'
 
-Rules:
-- Ask ONE question at a time.
-- NEVER skip fields.
-- Once all fields are collected, REPEAT the entire order to the customer for confirmation.
-- After repeating the order, say:
-  "Great! Your order is ready. I'm saving it now."
-- Then call the save_order tool with the final order JSON.
-- After saving, thank the customer and end politely.
+After collecting:
+- Provide a short simple reflection or encouragement.
+- Then recap:
+    - mood
+    - energy
+    - the 1–3 goals for today
+- Ask: "Does this sound right?"
+
+Then call the save_checkin tool with:
+- mood
+- energy
+- goals (list)
+- a short summary sentence
+
+After saving, thank the user gently and end.
 """,
-            tools=[save_order],
+            tools=[save_checkin]
         )
-        self.state = order_state
+
 
 # ------------------------------
 # PREWARM
@@ -97,31 +130,23 @@ async def entrypoint(ctx: JobContext):
 
     session = AgentSession(
         stt=deepgram.STT(model="nova-3"),
-
-        llm=google.LLM(
-            model="gemini-2.5-flash",
-        ),
-
+        llm=google.LLM(model="gemini-2.5-flash"),
         tts=murf.TTS(
             voice="en-US-matthew",
             style="Conversation",
             tokenizer=tokenize.basic.SentenceTokenizer(min_sentence_len=2),
             text_pacing=True
         ),
-
         turn_detection=MultilingualModel(),
         vad=ctx.proc.userdata["vad"],
         preemptive_generation=True,
     )
 
-    # ------------------------------
-    # Metrics
-    # ------------------------------
+    # metrics
     usage_collector = metrics.UsageCollector()
 
     @session.on("metrics_collected")
-    def _on_metrics_collected(ev: MetricsCollectedEvent):
-        metrics.log_metrics(ev.metrics)
+    def _on_metrics(ev: MetricsCollectedEvent):
         usage_collector.collect(ev.metrics)
 
     async def log_usage():
@@ -130,20 +155,19 @@ async def entrypoint(ctx: JobContext):
 
     ctx.add_shutdown_callback(log_usage)
 
-    # ------------------------------
-    # START SESSION
-    # ------------------------------
-
+    # Start session
     await session.start(
-        agent=BaristaAssistant(),
+        agent=WellnessAssistant(),
         room=ctx.room,
         room_input_options=RoomInputOptions(
-            noise_cancellation=noise_cancellation.BVC(),
-        ),
+            noise_cancellation=noise_cancellation.BVC()
+        )
     )
-    print("🚀 Barista Agent is LIVE and ready to take orders!")
+
+    print("🌿 Wellness Companion is LIVE and listening...")
+
     await asyncio.sleep(1)
-    await session.say("Welcome to BrewStar Café! What would you like to order today?")
+    await session.say("Hello! Let's take a moment to check in. How are you feeling today?")
 
     await ctx.connect()
 
